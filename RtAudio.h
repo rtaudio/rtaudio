@@ -734,6 +734,7 @@ protected:
     unsigned int device[2];    // Playback and record, respectively.
     void *apiHandle;           // void pointer for API specific stream handle information
     StreamMode mode;           // OUTPUT, INPUT, or DUPLEX.
+	bool isLoopback;
     StreamState state;         // STOPPED, RUNNING, or CLOSED
     char *userBuffer[2];       // Playback and record, respectively.
     char *deviceBuffer;
@@ -760,7 +761,7 @@ protected:
 #endif
 
     RtApiStream()
-      :apiHandle(0), deviceBuffer(0) { device[0] = 11111; device[1] = 11111; }
+      :apiHandle(0), deviceBuffer(0), isLoopback(false) { device[0] = 11111; device[1] = 11111; }
   };
 
   typedef S24 Int24;

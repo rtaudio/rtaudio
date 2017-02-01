@@ -23,3 +23,6 @@ target_link_libraries(testall rtaudio_static ${LINKLIBS})
 
 add_executable(teststops teststops.cpp)
 target_link_libraries(teststops rtaudio_static ${LINKLIBS})
+
+add_executable(grabber grabber.cpp)
+target_link_libraries(grabber rtaudio_static ${LINKLIBS})

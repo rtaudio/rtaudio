@@ -4501,7 +4501,9 @@ bool RtApiWasapi::probeDeviceOpen( unsigned int device, StreamMode mode, unsigne
   }
 
   // determine whether index falls within capture or render devices
-  if ( device >= renderDeviceCount ) {
+  bool isCaptureDevice = (device >= renderDeviceCount);
+  bool isRenderLoopback = !isCaptureDevice && mode == INPUT;
+  if ( isCaptureDevice || isRenderLoopback) {
     if ( mode != INPUT ) {
       errorType = RtAudioError::INVALID_USE;
       errorText_ = "RtApiWasapi::probeDeviceOpen: Capture device selected as output device.";
@@ -4511,11 +4513,20 @@ bool RtApiWasapi::probeDeviceOpen( unsigned int device, StreamMode mode, unsigne
     // retrieve captureAudioClient from devicePtr
     IAudioClient*& captureAudioClient = ( ( WasapiHandle* ) stream_.apiHandle )->captureAudioClient;
 
-    hr = captureDevices->Item( device - renderDeviceCount, &devicePtr );
-    if ( FAILED( hr ) ) {
-      errorText_ = "RtApiWasapi::probeDeviceOpen: Unable to retrieve capture device handle.";
-      goto Exit;
-    }
+	if (isRenderLoopback) {
+		hr = renderDevices->Item(device, &devicePtr);
+		if (FAILED(hr)) {
+			errorText_ = "RtApiWasapi::probeDeviceOpen: Unable to retrieve render device handle.";
+			goto Exit;
+		}
+	}
+	else {
+		hr = captureDevices->Item(device - renderDeviceCount, &devicePtr);
+		if (FAILED(hr)) {
+			errorText_ = "RtApiWasapi::probeDeviceOpen: Unable to retrieve capture device handle.";
+			goto Exit;
+		}
+	}
 
     hr = devicePtr->Activate( __uuidof( IAudioClient ), CLSCTX_ALL,
                               NULL, ( void** ) &captureAudioClient );
@@ -4572,8 +4583,10 @@ bool RtApiWasapi::probeDeviceOpen( unsigned int device, StreamMode mode, unsigne
     stream_.mode = DUPLEX;
   }
   else {
-    stream_.mode = mode;
+    stream_.mode =  mode;
   }
+
+  stream_.isLoopback = isRenderLoopback;
 
   stream_.device[mode] = device;
   stream_.doByteSwap[mode] = false;
@@ -4731,9 +4744,10 @@ void RtApiWasapi::wasapiThread()
     float desiredBufferSize = stream_.bufferSize * captureSrRatio;
     REFERENCE_TIME desiredBufferPeriod = ( REFERENCE_TIME ) ( ( float ) desiredBufferSize * 10000000 / captureFormat->nSamplesPerSec );
 
+	
     if ( !captureClient ) {
       hr = captureAudioClient->Initialize( AUDCLNT_SHAREMODE_SHARED,
-                                           AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+		  stream_.isLoopback ? AUDCLNT_STREAMFLAGS_LOOPBACK : AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
                                            desiredBufferPeriod,
                                            desiredBufferPeriod,
                                            captureFormat,
@@ -4750,19 +4764,28 @@ void RtApiWasapi::wasapiThread()
         goto Exit;
       }
 
-      // configure captureEvent to trigger on every available capture buffer
-      captureEvent = CreateEvent( NULL, FALSE, FALSE, NULL );
-      if ( !captureEvent ) {
-        errorType = RtAudioError::SYSTEM_ERROR;
-        errorText_ = "RtApiWasapi::wasapiThread: Unable to create capture event.";
-        goto Exit;
-      }
+	  if (stream_.isLoopback) {		  
+		  // a loopback client does not trigger
+		  // we could create a periodic timer with CreateWaitableTimer(NULL, FALSE, NULL),
+		  // but we just poll with GetNextPacketSize(), see below
+		  captureEvent = NULL;
+	  }
+	  else {
 
-      hr = captureAudioClient->SetEventHandle( captureEvent );
-      if ( FAILED( hr ) ) {
-        errorText_ = "RtApiWasapi::wasapiThread: Unable to set capture event handle.";
-        goto Exit;
-      }
+		  // configure captureEvent to trigger on every available capture buffer
+		  captureEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+		  if (!captureEvent) {
+			  errorType = RtAudioError::SYSTEM_ERROR;
+			  errorText_ = "RtApiWasapi::wasapiThread: Unable to create capture event.";
+			  goto Exit;
+		  }
+
+		  hr = captureAudioClient->SetEventHandle(captureEvent);
+		  if (FAILED(hr)) {
+			  errorText_ = "RtApiWasapi::wasapiThread: Unable to set capture event handle.";
+			  goto Exit;
+		  }
+	  }
 
       ( ( WasapiHandle* ) stream_.apiHandle )->captureClient = captureClient;
       ( ( WasapiHandle* ) stream_.apiHandle )->captureEvent = captureEvent;
@@ -4877,7 +4900,7 @@ void RtApiWasapi::wasapiThread()
     }
   }
 
-  if ( stream_.mode == INPUT ) {
+  if (stream_.mode == INPUT) {
     convBuffSize = ( size_t ) ( stream_.bufferSize * captureSrRatio ) * stream_.nDeviceChannels[INPUT] * formatBytes( stream_.deviceFormat[INPUT] );
     deviceBuffSize = stream_.bufferSize * stream_.nDeviceChannels[INPUT] * formatBytes( stream_.deviceFormat[INPUT] );
   }
@@ -5038,11 +5061,32 @@ void RtApiWasapi::wasapiThread()
     // 3. If 2. was successful: Release capture buffer
 
     if ( captureAudioClient ) {
-      // if the callback input buffer was not pulled from captureBuffer, wait for next capture event
-      if ( !callbackPulled ) {
-        WaitForSingleObject( captureEvent, INFINITE );
-      }
+		// if the callback input buffer was not pulled from captureBuffer, wait for next capture event
+		if (captureEvent && !callbackPulled) {
+			WaitForSingleObject(captureEvent, INFINITE);
+		}
 
+		UINT32 numFramesToRead, nps;
+		hr = captureAudioClient->GetCurrentPadding(&numFramesToRead);
+		if (FAILED(hr)) {
+			errorText_ = "RtApiWasapi::wasapiThread: Unable to retrieve next packet size.";
+			goto Exit;
+		}
+
+		if (stream_.isLoopback) {
+			// wait for data by poll & sleep			
+			while (numFramesToRead == 0) {
+				Sleep(2);
+
+				hr = captureAudioClient->GetCurrentPadding(&numFramesToRead);
+				if (FAILED(hr)) {
+					errorText_ = "RtApiWasapi::wasapiThread: Unable to retrieve current padding.";
+					goto Exit;
+				}
+			}			
+		}
+
+GetCaptureBuffer:
       // Get capture buffer from stream
       hr = captureClient->GetBuffer( &streamBuffer,
                                      &bufferFrameCount,
@@ -5052,7 +5096,13 @@ void RtApiWasapi::wasapiThread()
         goto Exit;
       }
 
+	  if ((AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY & captureFlags) == AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) {
+		  std::cout << "AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY" << std::endl;
+	  }
+
       if ( bufferFrameCount != 0 ) {
+		  numFramesToRead -= bufferFrameCount;
+
         // Push capture buffer into inputBuffer
         if ( captureBuffer.pushBuffer( ( char* ) streamBuffer,
                                        bufferFrameCount * stream_.nDeviceChannels[INPUT],
@@ -5074,6 +5124,11 @@ void RtApiWasapi::wasapiThread()
             goto Exit;
           }
         }
+
+		if (numFramesToRead >= bufferFrameCount) {
+			//std::cout << "re-read after" << bufferFrameCount << " frames, still " << numFramesToRead << std::endl;
+			goto GetCaptureBuffer;
+		}
       }
       else
       {
