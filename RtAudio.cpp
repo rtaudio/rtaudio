@@ -4705,6 +4705,7 @@ void RtApiWasapi::wasapiThread()
   RtAudioCallback callback = ( RtAudioCallback ) stream_.callbackInfo.callback;
   BYTE* streamBuffer = NULL;
   unsigned long captureFlags = 0;
+  bool underrun = false;
   unsigned int bufferFrameCount = 0;
   unsigned int numFramesPadding = 0;
   unsigned int convBufferSize = 0;
@@ -4923,6 +4924,15 @@ void RtApiWasapi::wasapiThread()
     goto Exit;
   }
 
+
+  // get the default device periodicity
+  REFERENCE_TIME hnsDefaultDevicePeriod, hnsMinimumDevicePeriod;
+  hr = (captureAudioClient ? captureAudioClient : renderAudioClient)->GetDevicePeriod(&hnsDefaultDevicePeriod, &hnsMinimumDevicePeriod);
+  if (FAILED(hr)) {
+	  errorText_ = "RtApiWasapi::wasapiThread: Unable to retrieve device period.";
+	  goto Exit;
+  }
+
   // stream process loop
   while ( stream_.state != STREAM_STOPPING ) {
     if ( !callbackPulled ) {
@@ -4980,8 +4990,10 @@ void RtApiWasapi::wasapiThread()
                                    stream_.userBuffer[INPUT],
                                    stream_.bufferSize,
                                    getStreamTime(),
-                                   captureFlags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY ? RTAUDIO_INPUT_OVERFLOW : 0,
+                                   (captureFlags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY ? RTAUDIO_INPUT_OVERFLOW : 0)
+			| (underrun ? RTAUDIO_OUTPUT_UNDERFLOW : 0),
                                    stream_.callbackInfo.userData );
+		underrun = false;
 
         // Handle return value from callback
         if ( callbackResult == 1 ) {
@@ -5073,16 +5085,20 @@ void RtApiWasapi::wasapiThread()
 			goto Exit;
 		}
 
-		if (stream_.isLoopback) {
+		if (stream_.isLoopback && !callbackPulled) {
 			// wait for data by poll & sleep			
 			while (numFramesToRead == 0) {
-				Sleep(2);
+				Sleep(hnsDefaultDevicePeriod / 10000 / 2);
 
 				hr = captureAudioClient->GetCurrentPadding(&numFramesToRead);
 				if (FAILED(hr)) {
 					errorText_ = "RtApiWasapi::wasapiThread: Unable to retrieve current padding.";
 					goto Exit;
 				}
+
+				// cant wait too long in duplex mode, so just skip capture
+				if (stream_.mode == DUPLEX)
+					goto StreamRender;
 			}			
 		}
 
@@ -5095,10 +5111,6 @@ GetCaptureBuffer:
         errorText_ = "RtApiWasapi::wasapiThread: Unable to retrieve capture buffer.";
         goto Exit;
       }
-
-	  if ((AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY & captureFlags) == AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) {
-		  std::cout << "AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY" << std::endl;
-	  }
 
       if ( bufferFrameCount != 0 ) {
 		  numFramesToRead -= bufferFrameCount;
@@ -5117,6 +5129,7 @@ GetCaptureBuffer:
         }
         else
         {
+			//captureFlags = AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY;
           // Inform WASAPI that capture was unsuccessful
           hr = captureClient->ReleaseBuffer( 0 );
           if ( FAILED( hr ) ) {
@@ -5127,7 +5140,7 @@ GetCaptureBuffer:
 
 		if (numFramesToRead >= bufferFrameCount) {
 			//std::cout << "re-read after" << bufferFrameCount << " frames, still " << numFramesToRead << std::endl;
-			goto GetCaptureBuffer;
+			//goto GetCaptureBuffer;
 		}
       }
       else
@@ -5191,6 +5204,8 @@ GetCaptureBuffer:
         }
         else
         {
+			underrun = true;
+			//std::cout << "underrun" << std::endl;
           // Inform WASAPI that render was unsuccessful
           hr = renderClient->ReleaseBuffer( 0, 0 );
           if ( FAILED( hr ) ) {
