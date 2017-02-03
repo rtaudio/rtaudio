@@ -4140,7 +4140,31 @@ RtAudio::DeviceInfo RtApiWasapi::getDeviceInfo( unsigned int device )
     goto Exit;
   }
 
-  info.name =convertCharPointerToStdString(deviceNameProp.pwszVal);
+  info.name = convertCharPointerToStdString(deviceNameProp.pwszVal);
+
+ 
+
+  // id see https://blogs.msdn.microsoft.com/matthew_van_eerde/2008/06/13/sample-find-out-if-your-default-audio-playback-and-audio-capture-devices-are-on-the-same-hardware/
+  /*
+  PROPVARIANT varDeviceInstanceId;
+  PropVariantInit(&varDeviceInstanceId);
+ hr = devicePropStore->GetValue(PKEY_Device_InstanceId, &varDeviceInstanceId);
+
+  if (FAILED(hr)) {
+	  errorText_ = "RtApiWasapi::getDeviceInfo: Unable to retrieve device property: PKEY_Device_InstanceId.";
+	  goto Exit;
+  }
+
+  if (varDeviceInstanceId.pwszVal) {
+	  info.id = convertCharPointerToStdString(varDeviceInstanceId.pwszVal) + "@";
+  }
+  */
+
+  LPWSTR idStr = 0;
+  devicePtr->GetId(&idStr);
+  if(idStr)
+	 info.id +=  convertCharPointerToStdString(idStr);
+ // PropVariantClear(&varDeviceInstanceId);
 
   // is default
   if ( isCaptureDevice ) {
@@ -4174,6 +4198,7 @@ RtAudio::DeviceInfo RtApiWasapi::getDeviceInfo( unsigned int device )
     info.inputChannels = 0;
     info.outputChannels = deviceFormat->nChannels;
     info.duplexChannels = 0;
+	info.canLoopback = true; // all playback devices support loopback
   }
 
   // sample rates
@@ -5161,6 +5186,7 @@ GetCaptureBuffer:
     // 3. If 2. was successful: Fill render buffer with next buffer
     //                          Release render buffer
 
+StreamRender:
     if ( renderAudioClient ) {
       // if the callback output buffer was not pushed to renderBuffer, wait for next render event
       if ( callbackPulled && !callbackPushed ) {
