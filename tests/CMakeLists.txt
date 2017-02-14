@@ -26,3 +26,13 @@ target_link_libraries(teststops rtaudio_static ${LINKLIBS})
 
 add_executable(grabber grabber.cpp)
 target_link_libraries(grabber rtaudio_static ${LINKLIBS})
+
+
+
+
+add_executable(recordwav recordwav.cpp)
+find_library(SNDFILE_LIB NAMES sndfile sndfile-1 libsndfile libsndfile-1 PATHS "C:/Program Files (x86)/Mega-Nerd/libsndfile/lib" )
+target_include_directories (recordwav PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${DRIVER_INCS} "C:/Program Files (x86)/Mega-Nerd/libsndfile/include" )
+target_link_libraries(recordwav rtaudio_static ${LINKLIBS} ${SNDFILE_LIB})
+
+
